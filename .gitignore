@@ -1,0 +1,55 @@
+node_modules/
+
+# Environment files; keep the checked-in template only.
+.env
+.env.*
+!.env.example
+
+# Credentials, certificates, and private keys.
+*.pem
+*.key
+*.p12
+*.pfx
+*.p7b
+*.p7c
+*.jks
+*.keystore
+id_rsa
+id_ed25519
+
+# Local MCP configuration may contain database credentials or API tokens.
+/.vscode/mcp.json
+
+# Local instruction dump can include copied credentials and session data.
+/instruction.md
+
+# Databases, dumps, and local data stores.
+*.db
+*.sqlite
+*.sqlite3
+*.bson
+*.dump
+*.archive
+
+# Build output, test coverage, caches, and temporary files.
+dist/
+build/
+out/
+coverage/
+.cache/
+.vite/
+.vitest-cache/
+*.tsbuildinfo
+*.tmp
+*.bak
+
+# Logs.
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Operating system files.
+.DS_Store
+Thumbs.db
+Desktop.ini

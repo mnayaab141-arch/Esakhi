@@ -1,0 +1,4 @@
+$kind: http-request
+url: "{{baseUrl}}/ready"
+method: GET
+order: 2000

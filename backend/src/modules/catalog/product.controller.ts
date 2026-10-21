@@ -1,0 +1,152 @@
+import type { RequestHandler } from 'express';
+import mongoose from 'mongoose';
+import { z } from 'zod';
+import { AuditLog } from '../audit/auditLog.model.js';
+import { sendData, sendPage } from '../../utils/apiResponse.js';
+import { AppError } from '../../utils/AppError.js';
+import { authenticatedUserId } from '../../utils/authenticatedUser.js';
+import { Product } from './product.model.js';
+import { idParamsSchema, productCreateSchema, productListQuerySchema, productUpdateSchema, slugParamsSchema } from './product.schemas.js';
+
+export const listProducts: RequestHandler = async (req, res) => {
+  const query = productListQuerySchema.parse(req.query);
+  const filter = {
+    isActive: true,
+    isArchived: false,
+    ...(query.category ? { category: query.category } : {}),
+    ...(query.q ? { $text: { $search: query.q } } : {}),
+  };
+  const [products, total] = await Promise.all([
+    Product.find(filter)
+      .select('name slug description category pricePaise imageUrls variants stock')
+      .sort(query.q ? { score: { $meta: 'textScore' as const } } : { createdAt: -1 })
+      .skip((query.page - 1) * query.limit)
+      .limit(query.limit)
+      .lean(),
+    Product.countDocuments(filter),
+  ]);
+  sendPage(res, products, query.page, query.limit, total);
+};
+
+export const getProductBySlug: RequestHandler = async (req, res) => {
+  const { slug } = slugParamsSchema.parse(req.params);
+  const product = await Product.findOne({ slug, isActive: true, isArchived: false })
+    .select('name slug description category pricePaise imageUrls variants stock')
+    .lean();
+  if (!product) throw new AppError(404, 'NOT_FOUND', 'Product not found.');
+  sendData(res, product);
+};
+
+export const listAllProductsForAdmin: RequestHandler = async (req, res) => {
+  const query = productListQuerySchema.extend({
+    active: zBooleanQuery.active.optional(),
+    archived: zBooleanQuery.archived.optional(),
+  }).parse(req.query);
+  const filter = {
+    ...(query.category ? { category: query.category } : {}),
+    ...(query.q ? { $text: { $search: query.q } } : {}),
+    ...(query.active === undefined ? {} : { isActive: query.active }),
+    ...(query.archived === undefined ? {} : { isArchived: query.archived }),
+  };
+  const [products, total] = await Promise.all([
+    Product.find(filter)
+      .sort(query.q ? { score: { $meta: 'textScore' as const } } : { createdAt: -1 })
+      .skip((query.page - 1) * query.limit)
+      .limit(query.limit)
+      .lean(),
+    Product.countDocuments(filter),
+  ]);
+  sendPage(res, products, query.page, query.limit, total);
+};
+
+const zBooleanQuery = {
+  active: z.enum(['true', 'false']).transform((value) => value === 'true'),
+  archived: z.enum(['true', 'false']).transform((value) => value === 'true'),
+};
+
+export const createProduct: RequestHandler = async (req, res) => {
+  const input = productCreateSchema.parse(req.body);
+  const actorId = authenticatedUserId(req);
+  const session = await mongoose.startSession();
+  let product;
+  try {
+    product = await session.withTransaction(async () => {
+      const [created] = await Product.create([input], { session });
+      if (!created) throw new AppError(500, 'INTERNAL_ERROR', 'The product could not be created.');
+      await AuditLog.create([{
+        actorId,
+        action: 'product.created',
+        resourceType: 'product',
+        resourceId: created.id,
+        metadata: { category: created.category },
+      }], { session });
+      return created;
+    });
+  } finally {
+    await session.endSession();
+  }
+  if (!product) throw new AppError(500, 'INTERNAL_ERROR', 'The product could not be created.');
+  sendData(res, product, 201);
+};
+
+export const updateProduct: RequestHandler = async (req, res) => {
+  const { id } = idParamsSchema.parse(req.params);
+  const input = productUpdateSchema.parse(req.body);
+  const actorId = authenticatedUserId(req);
+  const session = await mongoose.startSession();
+  let product;
+  try {
+    product = await session.withTransaction(async () => {
+      const updated = await Product.findOneAndUpdate(
+        { _id: id, isArchived: false },
+        { $set: input },
+        { new: true, runValidators: true, session },
+      );
+      if (!updated) throw new AppError(404, 'NOT_FOUND', 'Product not found.');
+      await AuditLog.create([{
+        actorId,
+        action: 'product.updated',
+        resourceType: 'product',
+        resourceId: updated.id,
+        metadata: { changedFields: Object.keys(input) },
+      }], { session });
+      return updated;
+    });
+  } finally {
+    await session.endSession();
+  }
+  if (!product) throw new AppError(500, 'INTERNAL_ERROR', 'The product could not be updated.');
+  sendData(res, product);
+};
+
+export const archiveProduct: RequestHandler = async (req, res) => {
+  const { id } = idParamsSchema.parse(req.params);
+  const actorId = authenticatedUserId(req);
+  const session = await mongoose.startSession();
+  let product;
+  try {
+    product = await session.withTransaction(async () => {
+      const archived = await Product.findOneAndUpdate(
+        { _id: id, isArchived: false },
+        { $set: { isArchived: true, isActive: false } },
+        { new: true, session },
+      );
+      if (!archived) throw new AppError(404, 'NOT_FOUND', 'Product not found.');
+      await AuditLog.create([{
+        actorId,
+        action: 'product.archived',
+        resourceType: 'product',
+        resourceId: archived.id,
+      }], { session });
+      return archived;
+    });
+  } finally {
+    await session.endSession();
+  }
+  if (!product) throw new AppError(500, 'INTERNAL_ERROR', 'The product could not be archived.');
+  sendData(res, { id: product.id, isArchived: true });
+};
+
+export const categoriesController: RequestHandler = (_req, res) => {
+  sendData(res, ['Bangles', 'Jewellery', 'Dupattas', 'Others']);
+};
