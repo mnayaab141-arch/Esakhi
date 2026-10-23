@@ -4,8 +4,21 @@ import { ZodError } from 'zod';
 import { AppError } from '../utils/AppError.js';
 import { logger } from '../utils/logger.js';
 import { env } from '../config/env.js';
+import multer from 'multer';
 
 export const errorHandler: ErrorRequestHandler = (error: unknown, _req, res, _next) => {
+  if (error instanceof multer.MulterError) {
+    const tooLarge = error.code === 'LIMIT_FILE_SIZE';
+    res.status(tooLarge ? 413 : 400).json({
+      success: false,
+      error: {
+        code: tooLarge ? 'PAYLOAD_TOO_LARGE' : 'INVALID_UPLOAD',
+        message: tooLarge ? 'Product images must be 5 MB or smaller.' : 'The image upload is invalid.',
+      },
+    });
+    return;
+  }
+
   if (error instanceof ZodError) {
     const fields: Record<string, string[]> = {};
     for (const issue of error.issues) {

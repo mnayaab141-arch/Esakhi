@@ -9,6 +9,7 @@ import { Order, type OrderRecord } from './order.model.js';
 import { User } from '../auth/user.model.js';
 import type { z } from 'zod';
 import { createOrderSchema } from './order.schemas.js';
+import { enqueueOrderStatusNotification } from '../notifications/orderNotification.service.js';
 
 type Checkout = z.infer<typeof createOrderSchema>;
 
@@ -169,9 +170,16 @@ export async function createOrder(actorId: string, input: Checkout): Promise<{ o
         paymentMethod: input.paymentMethod,
         paymentStatus: 'pending_verification',
         fulfilmentStatus: 'placed',
+        statusHistory: [{
+          status: 'placed',
+          changedAt: new Date(),
+          actorType: 'user',
+          actorId,
+        }],
         paymentEvents: [{ status: 'pending_verification', actorId, note: 'Order placed' }],
       }], { session });
       if (!order) throw new AppError(500, 'INTERNAL_ERROR', 'The order could not be created.');
+      await enqueueOrderStatusNotification(order, 'placed', session);
       await AuditLog.create([{
         actorId,
         action: 'order.placed',

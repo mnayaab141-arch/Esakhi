@@ -29,7 +29,7 @@ Backend-only implementation for the eSakhi handmade-products marketplace. It use
    ```
 
    The command provisions that phone number as an admin and seeds the supplied launch area (Damoh, Madhya Pradesh, PIN 470661) as disabled until the business configures fulfilment. There is no public admin-registration or role-promotion endpoint.
-8. Configure launch settings using the protected `PUT /api/v1/admin/settings` endpoint. Enable pickup/delivery and UPI/cash only after the business has confirmed the relevant instructions and fees. Select a stock reservation policy: `stockReservationHours: null` keeps stock reserved until staff/admin action; an integer from 1 to 720 enables automatic expiry of unconfirmed reservations.
+8. Configure launch settings using the protected `PUT /api/v1/admin/settings` endpoint. Enable pickup/delivery and UPI/cash only after the business has confirmed the relevant instructions, serviceable localities, PIN codes, and fees. Delivery validation matches the configured locality and PIN code; it does not verify an official municipal boundary. Select a stock reservation policy: `stockReservationHours: null` keeps stock reserved until staff/admin action; an integer from 1 to 720 enables automatic expiry of unconfirmed reservations.
 
 ## MSG91 production setup
 
@@ -62,8 +62,10 @@ The API listens on `PORT` (default `5000`). `GET /health` is process liveness; `
 - Configure `CLIENT_ORIGINS` with exact frontend origins. Do not use `*`.
 - Configure MongoDB as a least-privilege application user and use HTTPS and deployment-managed secrets in production.
 - Stock reservation and order creation are transactional; a standalone MongoDB server is not sufficient.
-- Image uploads and payment-proof uploads are not implemented. Products accept HTTPS image URLs only; payment is reconciled manually by an authorized admin.
-- A paid order cannot be cancelled through the current workflow until the business approves a refund policy. No gateway, refund, proof-upload, notification, Socket.IO, or analytics integrations are represented as active features.
+- Admin product images can be uploaded as JPEG, PNG, or WebP files up to 5 MB each. The backend stores them in `backend/uploads/product-images/`; this directory is ignored by Git. Configure persistent storage for this directory in deployments, or uploaded images will be lost when an ephemeral instance is replaced. Payment-proof uploads are not implemented; payment is reconciled manually by an authorized admin.
+- Delivery orders move through `preparing → out_for_delivery → delivered`; assign a delivery partner before marking an order out for delivery. Pickup orders move through `preparing → ready_for_pickup → completed`.
+- Optional Firebase Cloud Messaging notifications are queued for order status changes. To enable server delivery, set `FIREBASE_SERVICE_ACCOUNT_JSON` to the Firebase service-account JSON in the deployment secret store. If unset, push delivery remains disabled. Configure the frontend's public Firebase web-app values and Web Push VAPID key separately; never put service-account credentials in frontend configuration.
+- A paid order cannot be cancelled through the current workflow until the business approves a refund policy. Payment gateways, refunds, proof-upload, Socket.IO, and analytics integrations are not implemented.
 - `express-mongo-sanitize` from the generic instruction sheet is not included. The backend validates requests with strict Zod schemas and builds MongoDB filters from validated fields rather than forwarding user-supplied query objects. If adding a sanitizer later, verify Express 5 compatibility and ensure it does not silently mutate accepted input.
 - The in-memory rate-limit store is suitable for one process. Use a shared store before running multiple API instances.
 

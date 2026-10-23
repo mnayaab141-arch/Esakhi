@@ -20,7 +20,7 @@ export const updateProfileSchema = z.object({
   name: z.string().trim().min(1).max(120),
 }).strict();
 
-const savedAddressSchema = z.object({
+export const savedAddressSchema = z.object({
   id: z.string().regex(/^[a-f\d]{24}$/i).optional(),
   label: z.string().trim().max(40).optional(),
   name: z.string().trim().min(1).max(120),

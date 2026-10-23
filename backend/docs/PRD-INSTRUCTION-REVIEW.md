@@ -35,7 +35,7 @@ The generic instruction sheet is useful as a checklist, but it is not a domain s
 
 ## PRD launch decisions represented as configuration
 
-- Initial service area seeded by admin provisioning: Damoh, Madhya Pradesh, PIN 470661. Delivery and pickup remain disabled until configured.
+- Initial service area seeded by admin provisioning: Damoh, Madhya Pradesh, PIN 470661. Delivery and pickup remain disabled until configured. Delivery can be enabled with configured locality/PIN-code matches; the API does not verify the list against an official municipal boundary.
 - UPI, cash instructions, UPI ID/QR URL, locality delivery fees, contact details, policies, and staff access are stored as admin settings. No payment/contact/fee values are invented.
 - Stock reservation is configurable: `null` means hold until an admin action; 1–720 hours enables automatic release for unpaid/unconfirmed orders.
 - Customers may request cancellation; admins decide. Orders already marked paid cannot be cancelled until a refund policy is approved.
@@ -44,7 +44,7 @@ The generic instruction sheet is useful as a checklist, but it is not a domain s
 ## Remaining launch gates
 
 1. Verify MSG91's current API request/response contract using the actual account, approved OTP template, and Indian DLT registration. The public documentation page was reachable but did not expose its API schema in this environment; no paid send/verify or provider pricing/account-credit checks were possible here. Treat production OTP as blocked until a real MSG91 test passes.
-2. Configure the real locality list, delivery fees, available fulfilment methods, UPI/cash instructions, business contacts, and policy wording.
+2. Configure and verify the locality list, PIN codes, delivery fees, available fulfilment methods, UPI/cash instructions, business contacts, and policy wording. The configured locality/PIN list is the delivery restriction; no geospatial municipal-boundary check is performed.
 3. Approve cancellation/refund rules and the stock reservation duration.
 4. Verify backups/restoration and choose a shared rate-limit store before horizontal scaling.
 5. Run order/concurrency integration tests against the target replica-set MongoDB before launch; the included automated tests cover API health, validation, and authorization routing without needing live infrastructure.

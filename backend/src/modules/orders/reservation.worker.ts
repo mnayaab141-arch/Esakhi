@@ -4,6 +4,7 @@ import { AuditLog } from '../audit/auditLog.model.js';
 import { Product } from '../catalog/product.model.js';
 import { InventoryAdjustment } from '../inventory/inventoryAdjustment.model.js';
 import { Order } from './order.model.js';
+import { enqueueOrderStatusNotification } from '../notifications/orderNotification.service.js';
 
 export async function releaseExpiredReservations(): Promise<void> {
   const now = new Date();
@@ -48,7 +49,14 @@ export async function releaseExpiredReservations(): Promise<void> {
 
         order.fulfilmentStatus = 'cancelled';
         order.cancellationReason = 'Stock reservation expired.';
+        order.statusHistory.push({
+          status: 'cancelled',
+          changedAt: now,
+          actorType: 'system',
+          note: 'Stock reservation expired.',
+        });
         await order.save({ session });
+        await enqueueOrderStatusNotification(order, 'cancelled', session);
         await AuditLog.create([{
           actorType: 'system',
           action: 'order.reservation_expired',

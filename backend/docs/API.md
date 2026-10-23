@@ -19,7 +19,7 @@ This guide documents the API implemented in `backend/src/`. It is intended for d
 
 - **Base URL:** `http://localhost:5001` (configured in this workspace's local `.env`; the default is `http://localhost:5000`)
 - **API prefix:** `/api/v1`
-- **Content type:** JSON (`application/json`) for request bodies
+- **Content type:** JSON (`application/json`) except product image uploads, which use `multipart/form-data`
 - **Runtime:** Node.js 24, TypeScript, Express 5
 - **Database:** MongoDB through Mongoose
 - **Authentication:** short-lived JWT access token and rotating, HttpOnly refresh cookie
@@ -93,7 +93,7 @@ Configure `CLIENT_ORIGINS` with exact browser origins, for example `http://local
 
 ### Request and authorization rules
 
-- Send JSON request bodies with `Content-Type: application/json`. The maximum request body is 32 KB.
+- Send JSON request bodies with `Content-Type: application/json`; the maximum JSON body is 32 KB. The admin product image upload endpoint uses `multipart/form-data` and accepts one image up to 5 MB.
 - Protected customer routes require an active account and `Authorization: Bearer <access-token>`.
 - Admin routes require an active admin account unless the route says `Staff or admin`. Staff access additionally requires `staffEnabled: true` in store settings.
 - Request bodies and query parameters are validated against strict schemas. Unknown fields are rejected; use the documented fields only.
@@ -154,7 +154,7 @@ Not every error includes `fields`. Do not rely on the wording of validation mess
 ### Rate limits
 
 - General `/api/v1` routes: 120 requests per minute per client IP. `/health` and `/ready` are exempt.
-- OTP request, OTP verify, and refresh routes have an additional limit of 10 requests per 15 minutes.
+- OTP request and verify share a limit of 10 requests per 15 minutes per client IP. Refresh requests use a separate limit of 60 per 15 minutes so normal app session checks do not consume the OTP verification allowance.
 - OTP requests also enforce a one-minute per-phone resend interval.
 
 Rate-limited responses use `429 RATE_LIMIT_EXCEEDED`.
@@ -211,6 +211,8 @@ This table lists every HTTP endpoint registered by the current backend. The deta
 | `GET` | `/api/v1/orders` | Authenticated customer; own orders only | `200` |
 | `GET` | `/api/v1/orders/:id` | Authenticated customer; own order only | `200` |
 | `POST` | `/api/v1/orders/:id/cancellation-requests` | Authenticated customer; own order only | `200` |
+| `POST` | `/api/v1/notifications/push-token` | Authenticated customer | `201` |
+| `DELETE` | `/api/v1/notifications/push-token` | Authenticated customer; own token only | `200` |
 | `GET` | `/api/v1/admin/dashboard` | Admin | `200` |
 | `GET` | `/api/v1/admin/customers` | Admin | `200` |
 | `GET` | `/api/v1/admin/customers/:customerId` | Admin | `200` |
@@ -218,15 +220,19 @@ This table lists every HTTP endpoint registered by the current backend. The deta
 | `PATCH` | `/api/v1/admin/users/:userId/role` | Admin | `200` |
 | `PATCH` | `/api/v1/admin/users/:userId/status` | Admin | `200` |
 | `GET` | `/api/v1/admin/products` | Admin, or staff when staff access is enabled | `200` |
+| `POST` | `/api/v1/admin/products/images` | Admin | `201` |
 | `POST` | `/api/v1/admin/products` | Admin | `201` |
 | `PATCH` | `/api/v1/admin/products/:id` | Admin | `200` |
 | `DELETE` | `/api/v1/admin/products/:id` | Admin; archives, does not physically delete | `200` |
 | `GET` | `/api/v1/admin/orders` | Admin, or staff when staff access is enabled | `200` |
 | `GET` | `/api/v1/admin/orders/:id` | Admin, or staff when staff access is enabled | `200` |
 | `PATCH` | `/api/v1/admin/orders/:id/fulfilment` | Admin, or staff when staff access is enabled | `200` |
+| `PUT` | `/api/v1/admin/orders/:id/delivery-partner` | Admin, or staff when staff access is enabled | `200` |
 | `POST` | `/api/v1/admin/orders/:id/notes` | Admin, or staff when staff access is enabled | `200` |
 | `POST` | `/api/v1/admin/orders/:id/payment-review` | Admin | `200` |
 | `POST` | `/api/v1/admin/orders/:id/cancellation-review` | Admin | `200` |
+| `GET` | `/api/v1/admin/notifications` | Admin | `200` |
+| `POST` | `/api/v1/admin/notifications/:id/retry` | Admin | `200` |
 | `GET` | `/api/v1/admin/settings` | Admin | `200` |
 | `PUT` | `/api/v1/admin/settings` | Admin | `200` |
 | `POST` | `/api/v1/admin/inventory/:productId/adjustments` | Admin | `200` |
@@ -317,9 +323,9 @@ Invalid, expired, already-consumed, or exhausted OTP challenges return `400 OTP_
 
 - `POST /api/v1/auth/refresh` rotates the refresh cookie and returns a new access token. A missing cookie returns `401 UNAUTHORIZED`; an invalid, expired, revoked, or previously rotated cookie returns `401 REFRESH_TOKEN_INVALID`.
 - `POST /api/v1/auth/logout` revokes the refresh session when a valid cookie is supplied, clears the cookie, and returns `200`. It is safe to call without a cookie.
-- `GET /api/v1/auth/me` returns only the caller's safe profile.
+- `GET /api/v1/auth/me` returns the caller's safe profile and saved addresses in frontend format (`id`, `label`, `name`, `phone`, address fields).
 - `PATCH /api/v1/auth/me` accepts a strict body containing `name` (1–120 characters): `{"name":"Updated name"}`.
-- `PUT /api/v1/auth/me/addresses` replaces the caller's address list (maximum 10). Address fields: `name`, `phone` (`+91` Indian mobile), `addressLine1`, optional `addressLine2`, `locality`, `city`, `state`, and six-digit `postalCode`; optional `id` retains an existing address ID.
+- `PUT /api/v1/auth/me/addresses` replaces the caller's address list (maximum 10) and returns the saved addresses in the same frontend format. Address fields: optional `label`, `name`, `phone` (`+91` Indian mobile), `addressLine1`, optional `addressLine2`, `locality`, `city`, `state`, and six-digit `postalCode`; optional `id` retains an existing address ID. The account page's primary-address form saves one address and preloads it when reopened.
 
 ### Public catalogue and service area
 
@@ -342,7 +348,7 @@ Product list query parameters:
 | `category` | `Bangles`, `Jewellery`, `Dupattas`, or `Others` | Optional category filter |
 | `q` | String, up to 100 characters | Optional text search |
 
-The public catalogue returns only active, non-archived products. Price fields use integer paise. `GET /api/v1/service-area` returns `configured: false` when checkout has not yet been configured; it does not make checkout available by itself.
+The public catalogue returns only active, non-archived products. Price fields use integer paise. `GET /api/v1/service-area` returns `configured: false` when neither pickup nor delivery is enabled. When delivery is enabled, it returns the configured localities and six-digit postal codes. Checkout validates the locality and postal code against this configuration; it does not perform a municipal-boundary or geospatial address check.
 
 ### Customer orders
 
@@ -352,6 +358,8 @@ The public catalogue returns only active, non-archived products. Price fields us
 | `GET /api/v1/orders` | Customer | `200` | `400 VALIDATION_ERROR`, `401` |
 | `GET /api/v1/orders/:id` | Customer | `200` | `400 VALIDATION_ERROR`, `401`, `404 NOT_FOUND` |
 | `POST /api/v1/orders/:id/cancellation-requests` | Customer | `200` | `400 VALIDATION_ERROR`, `401`, `409 CANCELLATION_NOT_ALLOWED` |
+| `POST /api/v1/notifications/push-token` | Customer | `201` | `400 VALIDATION_ERROR`, `401`, `403`, `429 RATE_LIMIT_EXCEEDED` |
+| `DELETE /api/v1/notifications/push-token` | Customer | `200` | `400 VALIDATION_ERROR`, `401`, `403`, `429 RATE_LIMIT_EXCEEDED` |
 
 Create-order example for pickup:
 
@@ -377,7 +385,7 @@ Content-Type: application/json
 }
 ```
 
-For delivery, set `fulfilmentMethod` to `delivery` and include `address` with `name`, matching `phone`, `addressLine1`, optional `addressLine2`, `locality`, and six-digit `postalCode`. A provided address phone must match `customerPhone`.
+For delivery, set `fulfilmentMethod` to `delivery` and include `address` with `name`, matching `phone`, `addressLine1`, optional `addressLine2`, `locality`, and six-digit `postalCode`. The locality and postal code must match an admin-configured serviceable locality; a provided address phone must match `customerPhone`. Delivery is not checked against an official municipal boundary.
 
 Each item requires a 24-character MongoDB ObjectId `productId`, an integer `quantity` from 1 to 99, and an optional 24-character `variantId`. A product/variant can appear only once in `items`. The server calculates prices, delivery fees, and totals; client-submitted prices are not accepted.
 
@@ -398,6 +406,8 @@ Each item requires a 24-character MongoDB ObjectId `productId`, an integer `quan
 On successful checkout, payment starts at `pending_verification`; sending payment instructions or an OTP does not confirm payment. The returned order includes payment instructions appropriate to the configured payment method.
 
 `GET /api/v1/orders` accepts `page` and `limit`, and returns only the authenticated customer's orders. Customer-facing order reads omit internal notes and payment-review history. If an order does not exist or belongs to another user, `GET /api/v1/orders/:id` returns `404` without disclosing ownership.
+
+The order detail includes status history and, for delivery orders, the assigned delivery partner's name and phone. Internal partner notes and staff identity are not returned. Pickup orders may include the configured pickup instructions.
 
 Cancellation is a request for review, not an immediate cancellation. Customers can request cancellation only while an order is `placed` or `accepted`, and only once. A denied request returns `409 CANCELLATION_NOT_ALLOWED`.
 
@@ -443,11 +453,22 @@ Admin and enabled staff can read the admin catalogue. Product creation, update, 
 | Method and path | Minimum role | Success | Other expected outcomes |
 |---|---|---:|---|
 | `GET /api/v1/admin/products` | Staff | `200` | `400 VALIDATION_ERROR`, `401`, `403` |
+| `POST /api/v1/admin/products/images` | Admin | `201` | `400 IMAGE_REQUIRED`, `400 INVALID_IMAGE`, `400 UNSUPPORTED_IMAGE_TYPE`, `401`, `403`, `413 PAYLOAD_TOO_LARGE` |
 | `POST /api/v1/admin/products` | Admin | `201` | `400 VALIDATION_ERROR`, `401`, `403`, `409 CONFLICT` |
 | `PATCH /api/v1/admin/products/:id` | Admin | `200` | `400 VALIDATION_ERROR`, `401`, `403`, `404 NOT_FOUND`, `409 CONFLICT` |
 | `DELETE /api/v1/admin/products/:id` | Admin | `200` | `400 VALIDATION_ERROR`, `401`, `403`, `404 NOT_FOUND` |
 
 Admin product listing accepts `page`, `limit`, `category`, `q`, and optional `active`/`archived` values (`true` or `false`). Product creation accepts:
+
+Upload each product image before creating or updating a product:
+
+```http
+POST /api/v1/admin/products/images
+Authorization: Bearer <access-token>
+Content-Type: multipart/form-data
+```
+
+Send one file in the `image` field. JPEG, PNG, and WebP images up to 5 MB are accepted. The response returns an `imageUrl` path to include in the product's `imageUrls` array. Uploaded files are served publicly at that path.
 
 ```json
 {
@@ -456,7 +477,7 @@ Admin product listing accepts `page`, `limit`, `category`, `q`, and optional `ac
   "description": "Product description",
   "category": "Bangles",
   "pricePaise": 15000,
-  "imageUrls": ["https://example.com/image.jpg"],
+  "imageUrls": ["/uploads/product-images/123e4567-e89b-42d3-a456-426614174000.jpg"],
   "stock": 5,
   "lowStockThreshold": 2,
   "variants": [],
@@ -468,7 +489,7 @@ Important validation rules:
 
 - `category` must be one of the four configured categories.
 - `pricePaise` must be an integer from 1 to 100,000,000.
-- Image URLs, if provided, must use HTTPS; maximum 10.
+- Product image entries must be HTTPS URLs or paths returned by the image upload endpoint; maximum 10.
 - Slugs must be lowercase letters/numbers separated by single hyphens.
 - If variants are configured, top-level `stock` must be zero; each variant has its own stock.
 - Creation defaults `isActive` to false. Product updates cannot modify stock; use inventory adjustments instead.
@@ -485,11 +506,12 @@ Staff with staff access enabled and admins can use these routes. Payment review 
 | `GET /api/v1/admin/orders` | Staff | `200` | `400 VALIDATION_ERROR`, `401`, `403` |
 | `GET /api/v1/admin/orders/:id` | Staff | `200` | `400 VALIDATION_ERROR`, `401`, `403`, `404 NOT_FOUND` |
 | `PATCH /api/v1/admin/orders/:id/fulfilment` | Staff | `200` | `400 VALIDATION_ERROR`, `401`, `403`, `404 NOT_FOUND`, `409 INVALID_STATUS_TRANSITION` |
+| `PUT /api/v1/admin/orders/:id/delivery-partner` | Staff | `200` | `400 VALIDATION_ERROR`, `401`, `403`, `409 DELIVERY_PARTNER_NOT_ALLOWED` |
 | `POST /api/v1/admin/orders/:id/notes` | Staff | `200` | `400 VALIDATION_ERROR`, `401`, `403`, `404 NOT_FOUND` |
 | `POST /api/v1/admin/orders/:id/payment-review` | Admin | `200` | `400 VALIDATION_ERROR`, `401`, `403`, `409 PAYMENT_ALREADY_REVIEWED` |
 | `POST /api/v1/admin/orders/:id/cancellation-review` | Admin | `200` | `400 VALIDATION_ERROR`, `401`, `403`, `409` cancellation-related errors |
 
-`GET /admin/orders` accepts `page`, `limit`, `q`, `paymentStatus`, `fulfilmentStatus`, `from`, and `to`. Dates must be ISO-8601 timestamps with timezone offsets; `from` must not be later than `to`.
+`GET /admin/orders` accepts `page`, `limit`, `q`, `paymentStatus`, `fulfilmentStatus`, `cancellationRequest`, `from`, and `to`. Set `cancellationRequest=pending` to list unreviewed requests, or `reviewed` to list requests with a decision. Dates must be ISO-8601 timestamps with timezone offsets; `from` must not be later than `to`.
 
 Fulfilment update body:
 
@@ -503,9 +525,27 @@ Valid transitions are conditional on fulfilment method:
 
 - Both methods: `placed → accepted → preparing`
 - Pickup: `preparing → ready_for_pickup → completed`
-- Delivery: `preparing → out_for_delivery → completed`
+- Delivery: `preparing → out_for_delivery → delivered`
 
-Invalid transitions return `409 INVALID_STATUS_TRANSITION`. Staff may add an internal note with `{"note":"Contacted customer"}`; internal notes are excluded from customer order reads.
+Invalid transitions return `409 INVALID_STATUS_TRANSITION`. A delivery partner must be assigned before a delivery order can move to `out_for_delivery` (`409 DELIVERY_PARTNER_REQUIRED`). Staff may add an internal note with `{"note":"Contacted customer"}`; internal notes are excluded from customer order reads.
+
+Assign or reassign a delivery partner while a delivery order is `preparing` or `out_for_delivery`:
+
+```http
+PUT /api/v1/admin/orders/<order-id>/delivery-partner
+Authorization: Bearer <access-token>
+Content-Type: application/json
+```
+
+```json
+{
+  "name": "Delivery Partner",
+  "phone": "9876543210",
+  "internalNotes": "Optional internal note"
+}
+```
+
+The phone may be ten digits or `+91` plus ten digits; it is stored in normalized `+91` format. Assignment to pickup orders or orders outside the allowed statuses returns `409 DELIVERY_PARTNER_NOT_ALLOWED`.
 
 Payment review body:
 
@@ -529,6 +569,28 @@ Cancellation review body:
 
 `decision` must be `approved` or `rejected`; `note` is optional (maximum 500 characters). Approval is limited to orders in `placed` or `accepted`. Confirmed-payment orders cannot be cancelled until a refund policy is configured (`409 REFUND_POLICY_UNCONFIGURED`). An approved cancellation restores reserved stock within the transaction.
 
+The admin Orders page displays request state and provides a pending-request filter. Open an order to review the customer's note, optionally enter a response note, then approve or decline. Payment review is available on the admin order detail for `pending_verification` orders: enter a required audit note and choose **Confirm received payment** or **Mark payment rejected**. Payment review is one-time; its result and note are retained in the order's payment review history. Customer order detail refreshes automatically every 30 seconds and when the page regains focus so fulfilment and cancellation decisions appear without a manual refresh.
+
+### Push notifications
+
+Push notifications are optional. Customer devices register and remove their own Firebase Cloud Messaging token using these routes:
+
+| Method and path | Minimum role | Success | Other expected outcomes |
+|---|---|---:|---|
+| `POST /api/v1/notifications/push-token` | Customer | `201` | `400 VALIDATION_ERROR`, `401`, `403`, `429 RATE_LIMIT_EXCEEDED` |
+| `DELETE /api/v1/notifications/push-token` | Customer | `200` | `400 VALIDATION_ERROR`, `401`, `403`, `429 RATE_LIMIT_EXCEEDED` |
+
+Both routes accept `{"token":"<Firebase registration token>"}`. Token strings must contain 20–4096 characters; requests are limited to 20 changes per hour per client. Registration returns only `{"registered":true}` and removal only `{"removed":true}`.
+
+When configured, order status changes enqueue one event per active device token within the same transaction as the order update. The background worker sends notifications asynchronously, retries transient failures up to five attempts, and deactivates invalid tokens. If Firebase Admin is not configured, the worker does not send notifications.
+
+| Method and path | Minimum role | Success | Other expected outcomes |
+|---|---|---:|---|
+| `GET /api/v1/admin/notifications?page=1&limit=20` | Admin | `200` | `400 VALIDATION_ERROR`, `401`, `403` |
+| `POST /api/v1/admin/notifications/:id/retry` | Admin | `200` | `401`, `403`, `404 NOTIFICATION_NOT_FOUND`, `409 PUSH_TOKEN_UNAVAILABLE` |
+
+The admin list contains failed-event metadata only; it never returns FCM tokens or customer contact details. A retry resets an eligible failed event to pending. Retry delivery requires that the device token remains active.
+
 ### Admin settings and inventory
 
 | Method and path | Minimum role | Success | Other expected outcomes |
@@ -539,7 +601,7 @@ Cancellation review body:
 
 Before the first settings update, `GET /admin/settings` succeeds with `data: null`.
 
-`PUT /admin/settings` replaces the settings contract and requires these fields:
+`PUT /admin/settings` replaces the settings contract and requires these fields. Admins can enable delivery once they configure at least one serviceable locality, its six-digit postal code(s), and a delivery fee. The API does not verify that configuration against an official municipal boundary.
 
 ```json
 {
@@ -652,8 +714,8 @@ Routes that query or update MongoDB can also return `503 DATABASE_UNAVAILABLE` w
 - Order creation, stock reservation, cancellation review, inventory changes, and their audit writes use MongoDB transactions. A standalone MongoDB instance is not sufficient; use a replica set or a supported sharded deployment.
 - Reservation cleanup runs in the API process every minute when `stockReservationHours` is configured. Deployments with multiple API instances should consider worker coordination before scaling.
 - OTP request and verify codes are never included in API responses or application logs.
-- Product images are HTTPS URLs. Image uploads and payment-proof uploads are not implemented.
-- Payments are reconciled manually by an authorized admin. Payment gateways, refunds, notifications, and analytics integrations are not implemented.
+- Product images can be uploaded by an admin as JPEG, PNG, or WebP files up to 5 MB each. The backend stores them in `backend/uploads/product-images/`; deployments must mount persistent storage at that directory so images survive restarts and releases. Payment-proof uploads are not implemented.
+- Payments are reconciled manually by an authorized admin; payment gateways, refunds, and analytics integrations are not implemented. Optional push notifications require Firebase configuration as described in the backend README.
 - The in-memory rate-limit store is intended for a single process; configure a shared store before running multiple API instances.
 
 ## Postman

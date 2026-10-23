@@ -20,6 +20,9 @@ import {
   paymentReviewSchema,
 } from './order.schemas.js';
 import { createOrder } from './order.service.js';
+import { deliveryPartnerSchema } from './order.schemas.js';
+import { enqueueOrderStatusNotification } from '../notifications/orderNotification.service.js';
+import { nextFulfilmentStatus } from './order.transitions.js';
 
 export const createOrderController: RequestHandler = async (req, res) => {
   const input = createOrderSchema.parse(req.body);
@@ -48,7 +51,13 @@ export const getMyOrder: RequestHandler = async (req, res) => {
   const order = await Order.findOne({ _id: id, customerId: authenticatedUserId(req) })
     .select('-internalNotes -paymentEvents -idempotencyKey -cancellationRequest.reviewedBy -cancellationRequest.adminNote').lean();
   if (!order) throw new AppError(404, 'NOT_FOUND', 'Order not found.');
-  sendData(res, toCustomerOrder(order));
+  const settings = order.fulfilmentMethod === 'pickup'
+    ? await Settings.findOne({ key: 'global' }).select('pickupInstructions').lean()
+    : null;
+  sendData(res, {
+    ...toCustomerOrder(order),
+    ...(settings?.pickupInstructions ? { pickupInstructions: settings.pickupInstructions } : {}),
+  });
 };
 
 export const requestOrderCancellation: RequestHandler = async (req, res) => {
@@ -85,6 +94,14 @@ export const listAdminOrders: RequestHandler = async (req, res) => {
   const filter = {
     ...(query.paymentStatus ? { paymentStatus: query.paymentStatus } : {}),
     ...(query.fulfilmentStatus ? { fulfilmentStatus: query.fulfilmentStatus } : {}),
+    ...(query.cancellationRequest === 'pending' ? {
+      'cancellationRequest.requestedAt': { $exists: true },
+      'cancellationRequest.decision': { $exists: false },
+    } : {}),
+    ...(query.cancellationRequest === 'reviewed' ? {
+      'cancellationRequest.requestedAt': { $exists: true },
+      'cancellationRequest.decision': { $exists: true },
+    } : {}),
     ...(query.from || query.to ? {
       createdAt: {
         ...(query.from ? { $gte: new Date(query.from) } : {}),
@@ -116,19 +133,15 @@ export const getAdminOrder: RequestHandler = async (req, res) => {
 
 export const updateFulfilmentStatus: RequestHandler = async (req, res) => {
   const { id } = orderIdParamsSchema.parse(req.params);
-  const { status } = fulfilmentUpdateSchema.parse(req.body);
+  const { status, note } = fulfilmentUpdateSchema.parse(req.body);
   const order = await Order.findById(id);
   if (!order) throw new AppError(404, 'NOT_FOUND', 'Order not found.');
 
-  const nextStates: Record<string, string[]> = {
-    placed: ['accepted'],
-    accepted: ['preparing'],
-    preparing: [order.fulfilmentMethod === 'pickup' ? 'ready_for_pickup' : 'out_for_delivery'],
-    ready_for_pickup: ['completed'],
-    out_for_delivery: ['completed'],
-  };
-  if (!nextStates[order.fulfilmentStatus]?.includes(status)) {
+  if (nextFulfilmentStatus(order.fulfilmentStatus, order.fulfilmentMethod) !== status) {
     throw new AppError(409, 'INVALID_STATUS_TRANSITION', 'That fulfilment status transition is not allowed.');
+  }
+  if (status === 'out_for_delivery' && order.fulfilmentMethod === 'delivery' && !order.deliveryPartner) {
+    throw new AppError(409, 'DELIVERY_PARTNER_REQUIRED', 'Assign a delivery partner before marking this order out for delivery.');
   }
   const priorStatus = order.fulfilmentStatus;
   const actorId = authenticatedUserId(req);
@@ -137,11 +150,27 @@ export const updateFulfilmentStatus: RequestHandler = async (req, res) => {
   try {
     updatedOrder = await session.withTransaction(async () => {
       const updated = await Order.findOneAndUpdate(
-        { _id: id, fulfilmentStatus: priorStatus },
-        { $set: { fulfilmentStatus: status } },
+        {
+          _id: id,
+          fulfilmentStatus: priorStatus,
+          ...(status === 'out_for_delivery' && order.fulfilmentMethod === 'delivery' ? { 'deliveryPartner.name': { $exists: true } } : {}),
+        },
+        {
+          $set: { fulfilmentStatus: status },
+          $push: {
+            statusHistory: {
+              status,
+              changedAt: new Date(),
+              actorType: 'user',
+              actorId,
+              ...(note ? { note } : {}),
+            },
+          },
+        },
         { new: true, session },
       );
       if (!updated) throw new AppError(409, 'INVALID_STATUS_TRANSITION', 'The order status changed; reload and try again.');
+      await enqueueOrderStatusNotification(updated, status, session);
       await AuditLog.create([{
         actorId,
         action: 'order.fulfilment_updated',
@@ -156,6 +185,49 @@ export const updateFulfilmentStatus: RequestHandler = async (req, res) => {
   }
   if (!updatedOrder) throw new AppError(500, 'INTERNAL_ERROR', 'The fulfilment status could not be updated.');
   sendData(res, updatedOrder);
+};
+
+export const assignDeliveryPartner: RequestHandler = async (req, res) => {
+  const { id } = orderIdParamsSchema.parse(req.params);
+  const input = deliveryPartnerSchema.parse(req.body);
+  const actorId = authenticatedUserId(req);
+  const order = await Order.findOne({ _id: id, fulfilmentMethod: 'delivery', fulfilmentStatus: { $in: ['preparing', 'out_for_delivery'] } });
+  if (!order) throw new AppError(409, 'DELIVERY_PARTNER_NOT_ALLOWED', 'A delivery partner can only be assigned to a delivery order being prepared or delivered.');
+
+  const session = await mongoose.startSession();
+  let updated;
+  try {
+    updated = await session.withTransaction(async () => {
+      const assigned = await Order.findOneAndUpdate(
+        { _id: id, fulfilmentMethod: 'delivery', fulfilmentStatus: { $in: ['preparing', 'out_for_delivery'] } },
+        {
+          $set: {
+            deliveryPartner: {
+              name: input.name,
+              phoneE164: input.phone.startsWith('+91') ? input.phone : `+91${input.phone}`,
+              ...(input.internalNotes ? { internalNotes: input.internalNotes } : {}),
+              assignedAt: new Date(),
+              assignedBy: actorId,
+            },
+          },
+        },
+        { new: true, runValidators: true, session },
+      );
+      if (!assigned) throw new AppError(409, 'DELIVERY_PARTNER_NOT_ALLOWED', 'The order changed and the delivery partner was not assigned.');
+      await AuditLog.create([{
+        actorId,
+        action: order.deliveryPartner ? 'order.delivery_partner_reassigned' : 'order.delivery_partner_assigned',
+        resourceType: 'order',
+        resourceId: assigned.id,
+        metadata: { orderReference: assigned.orderReference },
+      }], { session });
+      return assigned;
+    });
+  } finally {
+    await session.endSession();
+  }
+  if (!updated) throw new AppError(500, 'INTERNAL_ERROR', 'The delivery partner could not be assigned.');
+  sendData(res, updated);
 };
 
 export const reviewPayment: RequestHandler = async (req, res) => {
@@ -233,6 +305,13 @@ export const reviewCancellation: RequestHandler = async (req, res) => {
           }], { session });
         }
         order.fulfilmentStatus = 'cancelled';
+        order.statusHistory.push({
+          status: 'cancelled',
+          changedAt: new Date(),
+          actorType: 'user',
+          actorId,
+          ...(input.note ? { note: input.note } : {}),
+        });
       }
       const cancellationRequest = order.cancellationRequest;
       if (!cancellationRequest) {
@@ -243,6 +322,9 @@ export const reviewCancellation: RequestHandler = async (req, res) => {
       cancellationRequest.decision = input.decision;
       cancellationRequest.adminNote = input.note ?? null;
       await order.save({ session });
+      if (input.decision === 'approved') {
+        await enqueueOrderStatusNotification(order, 'cancelled', session);
+      }
       await AuditLog.create([{
         actorId,
         action: `order.cancellation_${input.decision}`,
@@ -286,6 +368,21 @@ function toCustomerOrder(order: object): Record<string, unknown> {
     delete cancellation.reviewedBy;
     delete cancellation.adminNote;
     customerOrder.cancellationRequest = cancellation;
+  }
+  if (Array.isArray(customerOrder.statusHistory)) {
+    customerOrder.statusHistory = customerOrder.statusHistory.map((entry) => {
+      if (typeof entry !== 'object' || entry === null) return entry;
+      const customerEntry = { ...entry } as Record<string, unknown>;
+      delete customerEntry.actorId;
+      delete customerEntry.actorType;
+      return customerEntry;
+    });
+  }
+  if (typeof customerOrder.deliveryPartner === 'object' && customerOrder.deliveryPartner !== null) {
+    const partner = { ...customerOrder.deliveryPartner } as Record<string, unknown>;
+    delete partner.internalNotes;
+    delete partner.assignedBy;
+    customerOrder.deliveryPartner = partner;
   }
   return customerOrder;
 }

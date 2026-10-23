@@ -4,17 +4,26 @@ import { connectDatabase, disconnectDatabase } from './config/db.js';
 import { env } from './config/env.js';
 import { logger } from './utils/logger.js';
 import { releaseExpiredReservations } from './modules/orders/reservation.worker.js';
+import { processOrderNotificationQueue } from './modules/notifications/notification.worker.js';
+import { firebaseMessaging, isFirebaseAdminConfigured } from './modules/notifications/firebaseAdmin.js';
 
 const server = createServer(app);
 let reservationTimer: NodeJS.Timeout | undefined;
 
 async function start(): Promise<void> {
+  if (isFirebaseAdminConfigured()) firebaseMessaging();
   await connectDatabase();
   await releaseExpiredReservations();
+  await processOrderNotificationQueue();
   reservationTimer = setInterval(() => {
     void releaseExpiredReservations().catch((error: unknown) => {
       logger.error('Reservation cleanup failed', {
         message: error instanceof Error ? error.message : 'Unknown error',
+      });
+    });
+    void processOrderNotificationQueue().catch((error: unknown) => {
+      logger.error('Order notification processing failed', {
+        name: error instanceof Error ? error.name : 'Unknown error',
       });
     });
   }, 60_000);

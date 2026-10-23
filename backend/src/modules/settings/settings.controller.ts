@@ -10,11 +10,17 @@ import { settingsUpdateSchema } from './settings.schemas.js';
 export const getPublicServiceArea: RequestHandler = async (_req, res) => {
   const settings = await Settings.findOne({ key: 'global' }).lean();
   if (!settings) {
-    sendData(res, { configured: false, city: 'Damoh', state: 'Madhya Pradesh', serviceableLocalities: [] });
+    sendData(res, {
+      configured: false,
+      city: 'Damoh',
+      state: 'Madhya Pradesh',
+      deliveryEnabled: false,
+      serviceableLocalities: [],
+    });
     return;
   }
   sendData(res, {
-    configured: settings.deliveryEnabled || settings.pickupEnabled,
+    configured: settings.pickupEnabled || settings.deliveryEnabled,
     businessName: settings.businessName,
     phone: settings.phone,
     whatsapp: settings.whatsapp,
@@ -23,9 +29,7 @@ export const getPublicServiceArea: RequestHandler = async (_req, res) => {
     state: settings.state,
     deliveryEnabled: settings.deliveryEnabled,
     pickupEnabled: settings.pickupEnabled,
-    serviceableLocalities: settings.deliveryEnabled
-      ? settings.serviceableLocalities.map(({ name, postalCodes, deliveryFeePaise }) => ({ name, postalCodes, deliveryFeePaise }))
-      : [],
+    serviceableLocalities: settings.deliveryEnabled ? settings.serviceableLocalities : [],
     pickupInstructions: settings.pickupEnabled ? settings.pickupInstructions : undefined,
     paymentMethods: {
       upi: settings.upiEnabled ? { upiId: settings.upiId, qrImageUrl: settings.upiQrUrl, instructions: settings.upiInstructions } : undefined,

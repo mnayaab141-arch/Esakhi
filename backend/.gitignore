@@ -1,6 +1,7 @@
 node_modules/
 dist/
 coverage/
+uploads/product-images/
 .env
 .env.*
 !.env.example

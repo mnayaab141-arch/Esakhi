@@ -14,6 +14,8 @@ import { inventoryRoutes } from './modules/inventory/inventory.routes.js';
 import { adminRoutes } from './modules/admin/admin.routes.js';
 import { logger } from './utils/logger.js';
 import { AppError } from './utils/AppError.js';
+import { productImagesDirectory } from './modules/catalog/productImageUpload.js';
+import { adminNotificationRoutes, pushNotificationRoutes } from './modules/notifications/notification.routes.js';
 
 export const app = express();
 app.set('trust proxy', env.TRUST_PROXY_HOPS);
@@ -56,6 +58,13 @@ app.use((req, res, next) => {
   });
   next();
 });
+app.use('/uploads/product-images', express.static(productImagesDirectory, {
+  immutable: true,
+  maxAge: '1y',
+  setHeaders(response) {
+    response.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+  },
+}));
 
 app.get('/health', (_req, res) => {
   res.status(200).json({ success: true, data: { status: 'ok' } });
@@ -96,6 +105,7 @@ api.get('/', (_req, res) => {
   });
 });
 api.use('/auth', authRoutes);
+api.use('/notifications', pushNotificationRoutes);
 api.use('/products', productRoutes);
 api.use('/categories', (_req, res) => {
   res.status(200).json({ success: true, data: ['Bangles', 'Jewellery', 'Dupattas', 'Others'] });
@@ -104,6 +114,7 @@ api.use('/service-area', settingsRoutes);
 api.use('/orders', customerOrderRoutes);
 api.use('/admin/products', adminProductRoutes);
 api.use('/admin/orders', adminOrderRoutes);
+api.use('/admin/notifications', adminNotificationRoutes);
 api.use('/admin/settings', adminSettingsRoutes);
 api.use('/admin/inventory', inventoryRoutes);
 api.use('/admin', adminRoutes);

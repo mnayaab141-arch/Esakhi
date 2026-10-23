@@ -10,6 +10,7 @@ import {
   listProducts,
   updateProduct,
 } from './product.controller.js';
+import { receiveProductImage, saveProductImage } from './productImageUpload.js';
 
 export const productRoutes = Router();
 export const adminProductRoutes = Router();
@@ -20,6 +21,7 @@ productRoutes.get('/:slug', getProductBySlug);
 
 adminProductRoutes.use(requireAuth, requireRole('admin', 'staff'));
 adminProductRoutes.get('/', listAllProductsForAdmin);
+adminProductRoutes.post('/images', requireRole('admin'), receiveProductImage, saveProductImage);
 adminProductRoutes.post('/', requireRole('admin'), createProduct);
 adminProductRoutes.patch('/:id', requireRole('admin'), updateProduct);
 adminProductRoutes.delete('/:id', requireRole('admin'), archiveProduct);

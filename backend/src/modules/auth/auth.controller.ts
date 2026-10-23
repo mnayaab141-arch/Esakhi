@@ -65,6 +65,18 @@ export const meController: RequestHandler = async (req, res) => {
     name: user.name,
     role: user.role,
     status: user.status,
+    savedAddresses: user.savedAddresses.map((address) => ({
+      id: address._id.toString(),
+      label: address.label,
+      name: address.name,
+      phone: address.phoneE164,
+      addressLine1: address.addressLine1,
+      addressLine2: address.addressLine2,
+      locality: address.locality,
+      city: address.city,
+      state: address.state,
+      postalCode: address.postalCode,
+    })),
   });
 };
 
@@ -85,7 +97,18 @@ export const updateProfileController: RequestHandler = async (req, res) => {
     name: user.name,
     role: user.role,
     status: user.status,
-    savedAddresses: user.savedAddresses,
+    savedAddresses: user.savedAddresses.map((address) => ({
+      id: address._id.toString(),
+      label: address.label,
+      name: address.name,
+      phone: address.phoneE164,
+      addressLine1: address.addressLine1,
+      addressLine2: address.addressLine2,
+      locality: address.locality,
+      city: address.city,
+      state: address.state,
+      postalCode: address.postalCode,
+    })),
   });
 };
 
@@ -108,5 +131,16 @@ export const replaceSavedAddressesController: RequestHandler = async (req, res) 
     res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'User not found.' } });
     return;
   }
-  sendData(res, user.savedAddresses);
+  sendData(res, user.savedAddresses.map((address) => ({
+    id: address._id.toString(),
+    label: address.label,
+    name: address.name,
+    phone: address.phoneE164,
+    addressLine1: address.addressLine1,
+    addressLine2: address.addressLine2,
+    locality: address.locality,
+    city: address.city,
+    state: address.state,
+    postalCode: address.postalCode,
+  })));
 };

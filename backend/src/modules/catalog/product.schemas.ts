@@ -1,7 +1,10 @@
 import { z } from 'zod';
 
 const categorySchema = z.enum(['Bangles', 'Jewellery', 'Dupattas', 'Others']);
-const imageUrlSchema = z.string().url().refine(isHttpsUrl, 'Image URLs must use HTTPS.');
+const imageUrlSchema = z.string().refine(
+  (value) => isHttpsUrl(value) || isUploadedProductImage(value),
+  'Use an HTTPS image URL or upload an image through the admin workspace.',
+);
 const mapKeySchema = z.string().regex(/^[A-Za-z][A-Za-z0-9_-]{0,79}$/, 'Use letters, numbers, underscores, or hyphens for keys.');
 
 function isHttpsUrl(value: string): boolean {
@@ -11,6 +14,10 @@ function isHttpsUrl(value: string): boolean {
   } catch {
     return false;
   }
+}
+
+function isUploadedProductImage(value: string): boolean {
+  return /^\/uploads\/product-images\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.(?:jpg|png|webp)$/i.test(value);
 }
 
 const variantInputSchema = z.object({

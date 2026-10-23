@@ -1,9 +1,17 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import request from 'supertest';
 import type { Express } from 'express';
-import { requestOtpSchema } from '../src/modules/auth/auth.schemas.js';
+import { requestOtpSchema, savedAddressSchema } from '../src/modules/auth/auth.schemas.js';
 import { productCreateSchema } from '../src/modules/catalog/product.schemas.js';
-import { createOrderSchema, orderPaginationQuerySchema } from '../src/modules/orders/order.schemas.js';
+import {
+  createOrderSchema,
+  deliveryPartnerSchema,
+  fulfilmentUpdateSchema,
+  orderListQuerySchema,
+  orderPaginationQuerySchema,
+} from '../src/modules/orders/order.schemas.js';
+import { nextFulfilmentStatus } from '../src/modules/orders/order.transitions.js';
+import { pushTokenSchema } from '../src/modules/notifications/notification.schemas.js';
 import { settingsUpdateSchema } from '../src/modules/settings/settings.schemas.js';
 
 let app: Express;
@@ -16,16 +24,22 @@ const protectedRoutes = [
   ['GET', '/api/v1/orders'],
   ['GET', '/api/v1/orders/64a1b2c3d4e5f6a7b8c9d0e1'],
   ['POST', '/api/v1/orders/64a1b2c3d4e5f6a7b8c9d0e1/cancellation-requests'],
+  ['POST', '/api/v1/notifications/push-token'],
+  ['DELETE', '/api/v1/notifications/push-token'],
   ['GET', '/api/v1/admin/products'],
+  ['POST', '/api/v1/admin/products/images'],
   ['POST', '/api/v1/admin/products'],
   ['PATCH', '/api/v1/admin/products/64a1b2c3d4e5f6a7b8c9d0e1'],
   ['DELETE', '/api/v1/admin/products/64a1b2c3d4e5f6a7b8c9d0e1'],
   ['GET', '/api/v1/admin/orders'],
   ['GET', '/api/v1/admin/orders/64a1b2c3d4e5f6a7b8c9d0e1'],
   ['PATCH', '/api/v1/admin/orders/64a1b2c3d4e5f6a7b8c9d0e1/fulfilment'],
+  ['PUT', '/api/v1/admin/orders/64a1b2c3d4e5f6a7b8c9d0e1/delivery-partner'],
   ['POST', '/api/v1/admin/orders/64a1b2c3d4e5f6a7b8c9d0e1/notes'],
   ['POST', '/api/v1/admin/orders/64a1b2c3d4e5f6a7b8c9d0e1/payment-review'],
   ['POST', '/api/v1/admin/orders/64a1b2c3d4e5f6a7b8c9d0e1/cancellation-review'],
+  ['GET', '/api/v1/admin/notifications'],
+  ['POST', '/api/v1/admin/notifications/64a1b2c3d4e5f6a7b8c9d0e1/retry'],
   ['GET', '/api/v1/admin/settings'],
   ['PUT', '/api/v1/admin/settings'],
   ['POST', '/api/v1/admin/inventory/64a1b2c3d4e5f6a7b8c9d0e1/adjustments'],
@@ -69,6 +83,23 @@ describe('backend API foundation', () => {
     expect(() => requestOtpSchema.parse({ phone: '+911234567890' })).toThrow();
   });
 
+  it('accepts a complete saved address and rejects incomplete address fields', () => {
+    const address = {
+      label: 'Primary',
+      name: 'Customer',
+      phone: '+919876543210',
+      addressLine1: '12 Main Street',
+      addressLine2: 'Near the library',
+      locality: 'Civil Ward',
+      city: 'Damoh',
+      state: 'Madhya Pradesh',
+      postalCode: '470661',
+    };
+    expect(savedAddressSchema.safeParse(address).success).toBe(true);
+    expect(savedAddressSchema.safeParse({ ...address, city: '' }).success).toBe(false);
+    expect(savedAddressSchema.safeParse({ ...address, phone: '9876543210' }).success).toBe(false);
+  });
+
   it('requires an address for delivery checkout', () => {
     const parsed = createOrderSchema.safeParse({
       idempotencyKey: 'request-key-0001',
@@ -87,12 +118,18 @@ describe('backend API foundation', () => {
     expect(orderPaginationQuerySchema.safeParse({ page: '2', limit: '5', q: 'ignored' }).success).toBe(false);
   });
 
+  it('parses admin filters for pending and reviewed cancellation requests', () => {
+    expect(orderListQuerySchema.parse({ cancellationRequest: 'pending' }).cancellationRequest).toBe('pending');
+    expect(orderListQuerySchema.parse({ cancellationRequest: 'reviewed' }).cancellationRequest).toBe('reviewed');
+    expect(orderListQuerySchema.safeParse({ cancellationRequest: 'unknown' }).success).toBe(false);
+  });
+
   it('requires a configured delivery fee before enabling delivery', () => {
-    const parsed = settingsUpdateSchema.safeParse({
+    const settings = {
       businessName: 'eSakhi',
       city: 'Damoh',
       state: 'Madhya Pradesh',
-      serviceableLocalities: [{ name: 'Damoh', postalCodes: ['470661'] }],
+      serviceableLocalities: [{ name: 'Damoh', postalCodes: ['470661'], deliveryFeePaise: 0 }],
       pickupEnabled: true,
       deliveryEnabled: true,
       staffEnabled: false,
@@ -101,9 +138,13 @@ describe('backend API foundation', () => {
       policies: {},
       lowStockThreshold: 5,
       stockReservationHours: null,
-    });
+    };
 
-    expect(parsed.success).toBe(false);
+    expect(settingsUpdateSchema.safeParse({
+      ...settings,
+      serviceableLocalities: [{ name: 'Damoh', postalCodes: ['470661'] }],
+    }).success).toBe(false);
+    expect(settingsUpdateSchema.safeParse(settings).success).toBe(true);
   });
 
   it('does not allow base stock to be set when a product has variants', () => {
@@ -116,8 +157,40 @@ describe('backend API foundation', () => {
       stock: 1,
       variants: [{ attributes: { size: 'Small' }, stock: 2 }],
     });
-
     expect(parsed.success).toBe(false);
+  });
+
+  it('enforces separate delivery and pickup status transitions', () => {
+    expect(nextFulfilmentStatus('placed', 'delivery')).toBe('accepted');
+    expect(nextFulfilmentStatus('preparing', 'delivery')).toBe('out_for_delivery');
+    expect(nextFulfilmentStatus('out_for_delivery', 'delivery')).toBe('delivered');
+    expect(nextFulfilmentStatus('preparing', 'pickup')).toBe('ready_for_pickup');
+    expect(nextFulfilmentStatus('ready_for_pickup', 'pickup')).toBe('completed');
+    expect(nextFulfilmentStatus('cancelled', 'delivery')).toBeNull();
+  });
+
+  it('validates delivery partner details and the delivered status', () => {
+    expect(deliveryPartnerSchema.safeParse({ name: 'Delivery Partner', phone: '9876543210' }).success).toBe(true);
+    expect(deliveryPartnerSchema.safeParse({ name: 'Partner', phone: '12345' }).success).toBe(false);
+    expect(fulfilmentUpdateSchema.safeParse({ status: 'delivered' }).success).toBe(true);
+  });
+
+  it('validates push tokens', () => {
+    expect(pushTokenSchema.safeParse({ token: 'a'.repeat(40) }).success).toBe(true);
+    expect(pushTokenSchema.safeParse({ token: 'short' }).success).toBe(false);
+  });
+
+  it('accepts server-uploaded image paths in product data', () => {
+    const parsed = productCreateSchema.safeParse({
+      name: 'Handmade bangles',
+      slug: 'handmade-bangles',
+      description: 'Test product',
+      category: 'Bangles',
+      pricePaise: 15000,
+      imageUrls: ['/uploads/product-images/123e4567-e89b-42d3-a456-426614174000.jpg'],
+    });
+
+    expect(parsed.success).toBe(true);
   });
 
   it('provides a lightweight liveness response without database access', async () => {

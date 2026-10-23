@@ -3,6 +3,7 @@ import { requireAuth } from '../../middleware/requireAuth.js';
 import { requireRole } from '../../middleware/requireRole.js';
 import {
   addInternalNote,
+  assignDeliveryPartner,
   createOrderController,
   getAdminOrder,
   getMyOrder,
@@ -27,6 +28,7 @@ adminOrderRoutes.use(requireAuth, requireRole('admin', 'staff'));
 adminOrderRoutes.get('/', listAdminOrders);
 adminOrderRoutes.get('/:id', getAdminOrder);
 adminOrderRoutes.patch('/:id/fulfilment', updateFulfilmentStatus);
+adminOrderRoutes.put('/:id/delivery-partner', assignDeliveryPartner);
 adminOrderRoutes.post('/:id/notes', requireRole('admin', 'staff'), addInternalNote);
 adminOrderRoutes.post('/:id/payment-review', requireRole('admin'), reviewPayment);
 adminOrderRoutes.post('/:id/cancellation-review', requireRole('admin'), reviewCancellation);
