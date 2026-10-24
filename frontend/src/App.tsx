@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import type { ChangeEvent, FormEvent, ReactNode } from 'react';
 import { Link, NavLink, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { ApiError, api, refreshSession, resolveProductImageUrl, setAccessToken } from './api';
@@ -114,36 +114,6 @@ function useLoad<T>(load: () => Promise<T>, dependencies: unknown[] = EMPTY_DEPE
   return { data, error, loading, reload, setData };
 }
 
-function useAutoRefresh(reload: (showLoading?: boolean) => Promise<void>, loading: boolean): void {
-  const refreshInFlight = useRef(false);
-  useEffect(() => {
-    let active = true;
-    const refresh = async () => {
-      if (!active || loading || refreshInFlight.current || document.visibilityState !== 'visible') return;
-      refreshInFlight.current = true;
-      try {
-        await reload(false);
-      } finally {
-        refreshInFlight.current = false;
-      }
-    };
-    const timer = window.setInterval(() => { void refresh(); }, 30_000);
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible') void refresh();
-    };
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-    return () => {
-      active = false;
-      window.clearInterval(timer);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-    };
-  }, [loading, reload]);
-}
-
-function RefreshIndicator({ lastUpdated }: { lastUpdated: Date | null }): ReactNode {
-  return <p className="refresh-indicator">Auto-refreshes every 30 seconds · Last updated: {lastUpdated?.toLocaleTimeString('en-IN') ?? 'Loading'}</p>;
-}
-
 function App(): ReactNode {
   const [user, setUser] = useState<User | null>(null);
   const [ready, setReady] = useState(false);
@@ -161,10 +131,12 @@ function App(): ReactNode {
     const me = await api.me();
     setUser(me);
   }, []);
+
   const setSession = useCallback((nextUser: User, token: string) => {
     setAccessToken(token);
     setUser(nextUser);
   }, []);
+
   const signOut = useCallback(async () => {
     try {
       await api.logout();
@@ -173,46 +145,74 @@ function App(): ReactNode {
       setUser(null);
     }
   }, []);
+
   const add = useCallback((product: Product, quantity = 1, variantId?: string) => {
     setLines((existing) => {
       const key = `${getId(product)}:${variantId ?? 'base'}`;
       const found = existing.find((line) => productKey(line) === key);
       if (!found) return [...existing, { product, quantity, variantId }];
-      return existing.map((line) => productKey(line) === key ? { ...line, quantity: Math.min(99, line.quantity + quantity) } : line);
+      return existing.map((line) =>
+        productKey(line) === key
+          ? { ...line, quantity: Math.min(99, line.quantity + quantity) }
+          : line
+      );
     });
   }, []);
+
   const setQuantity = useCallback((key: string, quantity: number) => {
-    setLines((existing) => existing.map((line) => productKey(line) === key ? { ...line, quantity } : line));
+    setLines((existing) =>
+      existing.map((line) =>
+        productKey(line) === key ? { ...line, quantity } : line
+      )
+    );
   }, []);
-  const remove = useCallback((key: string) => setLines((existing) => existing.filter((line) => productKey(line) !== key)), []);
+
+  const remove = useCallback(
+    (key: string) =>
+      setLines((existing) => existing.filter((line) => productKey(line) !== key)),
+    []
+  );
+
   const clear = useCallback(() => setLines([]), []);
-  const syncProduct = useCallback((key: string, product: Product | null, unavailable: boolean) => {
-    setLines((existing) => {
-      let changed = false;
-      const next = existing.map((line) => {
-        if (productKey(line) !== key) return line;
-        if (product) {
-          if (line.product === product && !line.unavailable) return line;
+
+  const syncProduct = useCallback(
+    (key: string, product: Product | null, unavailable: boolean) => {
+      setLines((existing) => {
+        let changed = false;
+
+        const next = existing.map((line) => {
+          if (productKey(line) !== key) return line;
+
+          if (product) {
+            if (line.product === product && !line.unavailable) return line;
+            changed = true;
+            return { ...line, product, unavailable: false };
+          }
+
+          if (!unavailable || line.unavailable) return line;
+
           changed = true;
-          return { ...line, product, unavailable: false };
-        }
-        if (!unavailable || line.unavailable) return line;
-        changed = true;
-        return { ...line, unavailable: true };
+          return { ...line, unavailable: true };
+        });
+
+        return changed ? next : existing;
       });
-      return changed ? next : existing;
-    });
-  }, []);
+    },
+    []
+  );
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem('esakhi-theme', theme);
   }, [theme]);
+
   useEffect(() => {
     localStorage.setItem('esakhi-cart', JSON.stringify(lines));
   }, [lines]);
+
   useEffect(() => {
     let active = true;
+
     void (async () => {
       if (await refreshSession()) {
         try {
@@ -222,14 +222,26 @@ function App(): ReactNode {
           setAccessToken(null);
         }
       }
+
       if (active) setReady(true);
     })();
-    return () => { active = false; };
+
+    return () => {
+      active = false;
+    };
   }, []);
 
-  const authValue = useMemo(() => ({ user, ready, setSession, signOut, reloadUser }), [user, ready, setSession, signOut, reloadUser]);
-  const cartValue = useMemo(() => ({ lines, add, setQuantity, remove, clear, syncProduct }), [lines, add, setQuantity, remove, clear, syncProduct]);
+  const authValue = useMemo(
+    () => ({ user, ready, setSession, signOut, reloadUser }),
+    [user, ready, setSession, signOut, reloadUser]
+  );
 
+  const cartValue = useMemo(
+    () => ({ lines, add, setQuantity, remove, clear, syncProduct }),
+    [lines, add, setQuantity, remove, clear, syncProduct]
+  );
+
+  // Keep the rest of your original App() code here, unchanged.
   return (
     <AuthContext.Provider value={authValue}>
       <CartContext.Provider value={cartValue}>
